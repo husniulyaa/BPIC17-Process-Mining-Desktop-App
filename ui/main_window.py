@@ -27,6 +27,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView
 )
 
+from ui.pages.exercise_117_page import Exercise117Page
+from ui.pages.exercise_1115_page import Exercise1115Page
+from ui.pages.exercise_1118_page import Exercise1118Page
+from ui.pages.exercise_1122_page import Exercise1122Page
 
 C = dict(
     bg="#20251F",
@@ -862,6 +866,7 @@ PAGES = [
 ]
 
 
+
 class MainWindow(QMainWindow):
     dataset_requested = Signal(str)
 
@@ -884,7 +889,6 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         # HEADER
-
         header = QFrame()
         header.setObjectName("header")
 
@@ -894,7 +898,6 @@ class MainWindow(QMainWindow):
 
         ident = QVBoxLayout()
         ident.setSpacing(0)
-
         ident.addWidget(label("BPIC17", "brand"))
         ident.addWidget(
             label("LOAN APPLICATION EVENT LOG WORKSPACE", "muted")
@@ -905,20 +908,17 @@ class MainWindow(QMainWindow):
 
         self.status = label("No dataset loaded", "muted")
         self.status.setTextFormat(Qt.RichText)
-
         header_layout.addWidget(self.status)
 
         self.import_btn = QPushButton("Import XES")
         self.import_btn.setObjectName("primary")
         self.import_btn.setCursor(Qt.PointingHandCursor)
         self.import_btn.clicked.connect(self._on_import)
-
         header_layout.addWidget(self.import_btn)
 
         outer.addWidget(header)
 
-        # HORIZONTAL NAVIGATION
-
+        # NAVIGATION
         navbar = QFrame()
         navbar.setObjectName("navbar")
 
@@ -933,18 +933,17 @@ class MainWindow(QMainWindow):
         segment_layout.setSpacing(2)
 
         self.stack = QStackedWidget()
-
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
-
         self.nav_buttons = []
 
+        # REAL EXERCISE PAGES
         self.pages = [
             OverviewPage(),
-            ExercisePage("11.7"),
-            ExercisePage("11.15"),
-            ExercisePage("11.18"),
-            ExercisePage("11.22"),
+            Exercise117Page(),
+            Exercise1115Page(),
+            Exercise1118Page(),
+            Exercise1122Page(),
             CaseExplorerPage()
         ]
 
@@ -970,7 +969,6 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.stack, 1)
 
         # FOOTER
-
         footer = QFrame()
         footer.setObjectName("footer")
 
@@ -986,13 +984,13 @@ class MainWindow(QMainWindow):
         outer.addWidget(footer)
 
     # PUBLIC CONTRACT
-
     def set_event_data(self, df, path=None):
         self.event_df = df
 
         if path is not None:
             self.dataset_path = path
 
+        # Kirim dataset ke seluruh halaman
         for page in self.pages:
             page.set_event_data(df)
 
@@ -1018,7 +1016,6 @@ class MainWindow(QMainWindow):
         self._set_status(message, "err")
 
     # INTERNALS
-
     def _set_status(self, text, state):
         color = {
             "ok": C["ok"],
@@ -1045,7 +1042,6 @@ class MainWindow(QMainWindow):
             self.foot_path.setText(path)
             self._set_status("Loading dataset…", "busy")
             self.dataset_requested.emit(path)
-
 
 def _demo_df(n=300):
     random.seed(1)

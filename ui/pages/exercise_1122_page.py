@@ -333,31 +333,64 @@ class Exercise1122Page(QWidget):
         status_row.addWidget(self.progress)
         root.addLayout(status_row)
 
+
         # Kartu ringkasan metrik
         cards_layout = QGridLayout()
         cards_layout.setSpacing(10)
+
         metric_specs = (
             ("matched", "Case Memenuhi 11.22"),
             ("total_log", "Total Case di Log"),
             ("percentage", "Persentase Case"),
             ("same_ts", "Timestamp Sama (Dikecualikan)"),
         )
+
         for col_idx, (key, caption) in enumerate(metric_specs):
             frame = QFrame()
-            frame.setFrameShape(QFrame.Shape.StyledPanel)
-            frame.setStyleSheet(
-                "QFrame { border: 1px solid #c8c8c8; border-radius: 5px; }"
-            )
+            frame.setObjectName("metricCard")
+            frame.setStyleSheet("""
+                QFrame#metricCard {
+                    background-color: #292F27;
+                    border: 1px solid #454A3E;
+                    border-radius: 8px;
+                }
+            """)
+
             box = QVBoxLayout(frame)
-            box.setContentsMargins(10, 8, 10, 8)
+            box.setContentsMargins(12, 10, 12, 10)
+            box.setSpacing(5)
+
             lbl_cap = QLabel(caption)
+            lbl_cap.setStyleSheet("""
+                QLabel {
+                    color: #B6B3A7;
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    font-size: 11px;
+                }
+            """)
+
             lbl_val = QLabel("—")
-            lbl_val.setStyleSheet("font-size: 16px; font-weight: bold;")
+            lbl_val.setStyleSheet("""
+                QLabel {
+                    color: #F1EDE2;
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    font-size: 20px;
+                    font-weight: bold;
+                }
+            """)
+
             box.addWidget(lbl_cap)
             box.addWidget(lbl_val)
+
             cards_layout.addWidget(frame, 0, col_idx)
             self._metric_labels[key] = lbl_val
+
         root.addLayout(cards_layout)
+
 
         # Banner peringatan (tampil hanya jika ada warnings)
         self.lbl_warnings = QLabel("")
