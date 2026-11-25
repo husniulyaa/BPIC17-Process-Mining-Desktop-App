@@ -1,0 +1,5 @@
+# Versi dependency akan disepakati dan diuji bersama sebelum dipin.
+pm4py
+pandas
+PySide6
+matplotlib
