@@ -3,3 +3,4 @@ pm4py
 pandas
 PySide6
 matplotlib
+pytest
