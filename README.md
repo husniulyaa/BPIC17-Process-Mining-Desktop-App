@@ -149,7 +149,7 @@ Ikuti langkah berikut untuk menyiapkan aplikasi di komputer lokal.
 Buka terminal atau PowerShell, kemudian jalankan:
 
 ```powershell
-git clone <URL_REPOSITORY>
+git clone https://github.com/husniulyaa/BPIC17-Process-Mining-Desktop-App.git
 cd BPIC17-Process-Mining-Desktop-App
 ```
 
