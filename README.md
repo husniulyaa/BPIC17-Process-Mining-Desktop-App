@@ -153,8 +153,6 @@ git clone https://github.com/husniulyaa/BPIC17-Process-Mining-Desktop-App.git
 cd BPIC17-Process-Mining-Desktop-App
 ```
 
-Ganti `<URL_REPOSITORY>` dengan alamat repository GitHub proyek.
-
 ### 5.2 Membuat Virtual Environment
 
 Virtual environment digunakan agar dependency proyek tidak bercampur dengan instalasi Python lainnya.
