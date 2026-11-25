@@ -37,15 +37,15 @@ Interpretasi akhir setiap latihan harus dicocokkan dengan redaksi instruksi/doku
 
 PM4Py merupakan library analisis event log, bukan framework antarmuka. PySide6 digunakan untuk membangun GUI desktop. Google Colab boleh digunakan untuk eksperimen analisis secara terpisah, tetapi aplikasi akhir tetap berupa aplikasi desktop yang dijalankan secara lokal.
 
-## Pembagian tugas tim
+## Pembagian Tugas Tim
 
-| Anggota                   |                              Tanggung jawab                                           |
-|                           |                                                                                       |
-| Nabila Kayla Rafa         | Import dataset XES, validasi atribut, konversi DataFrame, dan Dataset Overview.       |
-| Husni Ulyaa Khanifah      | Kerangka GUI utama, navigasi, shared state/data integration, dan integrasi halaman.   |
-| Ovilia Suci Ramadhani     | Implementasi Exercise 11.7 A–E.                                                       |
-| Mohammad Sulthon Ariefin  | Implementasi Exercise 11.15 dan 11.18.                                                |
-| Farras Hilmy Zaidan       | Implementasi Exercise 11.22, Case Explorer, dan CSV export.                           |
+| NIM | Nama Anggota | Tanggung Jawab |
+|---|---|---|
+| 24060124120022 | Nabila Kayla Rafa | Import dataset XES, validasi atribut, konversi DataFrame, dan Dataset Overview. |
+| 24060124120021 | Husni Ulyaa Khanifah | Kerangka GUI utama, navigasi, shared state/data integration, dan integrasi halaman. |
+| 24060124120040 | Ovilia Suci Ramadhani | Implementasi Exercise 11.7 A–E. |
+| 24060124130104 | Mohammad Sulthon Ariefin | Implementasi Exercise 11.15 dan 11.18. |
+| 24060124120003 | Farras Hilmy Zaidan | Implementasi Exercise 11.22, Case Explorer, dan CSV export. |
 
 Setiap anggota bertanggung jawab menguji bagian masing-masing dan mendokumentasikan asumsi atau keterbatasan yang ditemukan.
 
