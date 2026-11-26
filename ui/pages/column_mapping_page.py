@@ -1,4 +1,4 @@
-+"""Fluxicon Disco-inspired Column Configuration & Universal Data Mapping page.
+"""Fluxicon Disco-inspired Column Configuration & Universal Data Mapping page.
 
 Reproduces Disco's interactive column mapping screen:
 - Top steel-blue gradient ribbon showing the active column name, 'column is used'
