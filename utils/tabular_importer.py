@@ -42,6 +42,7 @@ from core.dataset_loader import load_xes
 
 LIFECYCLE_ATTRIBUTE = OPTIONAL_ATTRIBUTES[0]  # "lifecycle:transition"
 RESOURCE_ATTRIBUTE = OPTIONAL_ATTRIBUTES[1]  # "org:resource"
+START_TIMESTAMP_ATTRIBUTE = "time:start_timestamp"
 
 ROLE_IGNORE = "ignore"
 ROLE_CASE = "case"
@@ -483,21 +484,23 @@ def apply_column_mapping(
     role_map: Mapping[str, str],
     *,
     timestamp_format: str | None = None,
-    ffill_case_id: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Transform ``raw_df`` into a validated XES-contract event DataFrame.
 
-    Follows Fluxicon Disco's mapping semantics:
-    - Requires at least one column assigned to ``case``, ``activity``, and
-      ``timestamp``.
-    - Multiple ``case`` / ``activity`` / ``resource`` columns are concatenated.
-    - If multiple ``timestamp`` columns are selected (e.g. Start + Complete
-      Timestamp), the last non-null timestamp per row is used as primary
-      ``time:timestamp`` while earlier timestamp columns are retained as event
-      attributes.
-    - Blank Case ID cells in grouped spreadsheets (like row 1 in Disco's
-      procurement CSV example) are safely filled or cleaned without mutating
-      ``raw_df``.
+    Strictly enforces the three foundational Process Mining event-log
+    cardinality rules (non-OCPM):
+    1. **Exactly 1 Case ID (`len(case_cols) == 1` & non-empty per event)**:
+       Events without a Case ID (orphan events) are rejected/filtered out, and
+       assigning 0 or >1 Case ID columns raises ``ValueError``.
+    2. **At least 1 Activity (`len(act_cols) >= 1` & non-empty per event/case)**:
+       Events without an Activity are rejected/filtered out so every surviving
+       case has >= 1 valid activity.
+    3. **At least 1 Timestamp (`len(ts_cols) >= 1` & >= 1 valid timestamp per event)**:
+       Events with no valid timestamp are rejected/filtered out. When 2+
+       timestamp columns are mapped (e.g. Start + Complete Timestamp), the
+       earliest timestamp is stored in ``time:start_timestamp`` and the latest
+       in ``time:timestamp`` to enable both **Service Time** and **Waiting Time**
+       calculation.
     """
     if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
         raise ValueError("Source DataFrame is empty.")
@@ -509,49 +512,63 @@ def apply_column_mapping(
     lc_cols = [c for c in raw_df.columns if role_map.get(str(c)) == ROLE_LIFECYCLE]
     other_cols = [c for c in raw_df.columns if role_map.get(str(c)) == ROLE_OTHER]
 
-    missing_roles = []
-    if not case_cols:
-        missing_roles.append("Case ID")
-    if not act_cols:
-        missing_roles.append("Activity")
-    if not ts_cols:
-        missing_roles.append("Timestamp")
-    if missing_roles:
+    # --- Cardinality Rule Validation (Column Level) ---
+    cardinality_errors: list[str] = []
+    if len(case_cols) == 0:
+        cardinality_errors.append("Exactly 1 Case ID column is required (found 0)")
+    elif len(case_cols) > 1:
+        cardinality_errors.append(
+            f"Exactly 1 Case ID column is allowed per event (found {len(case_cols)}: "
+            + ", ".join(map(str, case_cols))
+            + ")"
+        )
+    if len(act_cols) < 1:
+        cardinality_errors.append("At least 1 Activity column is required (found 0)")
+    if len(ts_cols) < 1:
+        cardinality_errors.append("At least 1 Timestamp column is required (found 0)")
+
+    if cardinality_errors:
         raise ValueError(
-            "Please assign at least one column for: " + ", ".join(missing_roles)
+            "Process mining cardinality rule violation: "
+            + "; ".join(cardinality_errors)
+            + "."
         )
 
     out = pd.DataFrame(index=raw_df.index)
 
-    # Case ID (support forward-fill for grouped spreadsheet exports if needed)
-    case_series = _combine_columns(raw_df, case_cols, "_")
-    if ffill_case_id and case_series.isna().any() and case_series.notna().any():
-        case_series = case_series.ffill().bfill()
-    out[CASE_ID_ATTRIBUTE] = case_series.where(
-        case_series.notna(), None
-    )
+    # 1. Exactly 1 Case ID (no ffill fabrication on orphan rows!)
+    raw_case = raw_df[case_cols[0]]
+    case_clean = raw_case.where(raw_case.notna(), "").astype(str).str.strip()
+    out[CASE_ID_ATTRIBUTE] = case_clean.where(case_clean != "", None)
 
-    # Activity
-    act_series = _combine_columns(raw_df, act_cols, " - ")
-    out[ACTIVITY_ATTRIBUTE] = act_series
+    # 2. At least 1 Activity
+    act_raw = _combine_columns(raw_df, act_cols, " - ")
+    act_clean = act_raw.where(act_raw.notna(), "").astype(str).str.strip()
+    out[ACTIVITY_ATTRIBUTE] = act_clean.where(act_clean != "", None)
 
-    # Timestamp (if multiple timestamp columns are marked, coalesce from right to left,
-    # e.g., Complete Timestamp preferred with Start Timestamp fallback, while keeping all
-    # individual timestamp columns as attributes!)
+    # 3. At least 1 Timestamp (supports single atomic timestamp OR Start + Complete timestamps)
     parsed_ts_list = [
-        (col, parse_flexible_timestamps(raw_df[col], timestamp_format))
+        (str(col), parse_flexible_timestamps(raw_df[col], timestamp_format))
         for col in ts_cols
     ]
-    primary_ts = parsed_ts_list[-1][1].copy()
-    for _col, pts in reversed(parsed_ts_list[:-1]):
-        primary_ts = primary_ts.fillna(pts)
-    out[TIMESTAMP_ATTRIBUTE] = primary_ts
-
-    if len(parsed_ts_list) > 1:
-        for col, pts in parsed_ts_list:
-            attr_name = str(col)
-            if attr_name not in (CASE_ID_ATTRIBUTE, ACTIVITY_ATTRIBUTE, TIMESTAMP_ATTRIBUTE):
-                out[attr_name] = pts
+    if len(parsed_ts_list) == 1:
+        out[TIMESTAMP_ATTRIBUTE] = parsed_ts_list[0][1]
+        has_dual_ts = False
+    else:
+        ts_matrix = pd.concat([pts for _c, pts in parsed_ts_list], axis=1)
+        start_ts = ts_matrix.min(axis=1)
+        complete_ts = ts_matrix.max(axis=1)
+        out[TIMESTAMP_ATTRIBUTE] = complete_ts
+        out[START_TIMESTAMP_ATTRIBUTE] = start_ts
+        has_dual_ts = True
+        for col_name, pts in parsed_ts_list:
+            if col_name not in (
+                CASE_ID_ATTRIBUTE,
+                ACTIVITY_ATTRIBUTE,
+                TIMESTAMP_ATTRIBUTE,
+                START_TIMESTAMP_ATTRIBUTE,
+            ):
+                out[col_name] = pts
 
     # Optional Resource (Person)
     if res_cols:
@@ -569,23 +586,39 @@ def apply_column_mapping(
         out[target_name] = raw_df[col]
         reserved.add(target_name)
 
-    # Drop completely empty rows lacking both Case ID and Activity
-    valid_mask = out[CASE_ID_ATTRIBUTE].notna() & out[ACTIVITY_ATTRIBUTE].notna()
+    # --- Cardinality Rule Validation (Row / Event Level) ---
+    has_case = out[CASE_ID_ATTRIBUTE].notna()
+    has_act = out[ACTIVITY_ATTRIBUTE].notna()
+    has_ts = out[TIMESTAMP_ATTRIBUTE].notna()
+
+    orphan_dropped = int((~has_case).sum())
+    missing_act_dropped = int((has_case & ~has_act).sum())
+    missing_ts_dropped = int((has_case & has_act & ~has_ts).sum())
+
+    valid_mask = has_case & has_act & has_ts
     out = out.loc[valid_mask].copy()
     if out.empty:
         raise ValueError(
-            "No valid event rows remained after applying column mapping."
+            "No valid events remained after enforcing process mining cardinality "
+            f"(orphan events without Case ID: {orphan_dropped}, "
+            f"missing Activity: {missing_act_dropped}, "
+            f"missing/invalid Timestamp: {missing_ts_dropped})."
         )
 
-    out[CASE_ID_ATTRIBUTE] = out[CASE_ID_ATTRIBUTE].astype(str).str.strip()
-    out[ACTIVITY_ATTRIBUTE] = out[ACTIVITY_ATTRIBUTE].astype(str).str.strip()
+    out[CASE_ID_ATTRIBUTE] = out[CASE_ID_ATTRIBUTE].astype(str)
+    out[ACTIVITY_ATTRIBUTE] = out[ACTIVITY_ATTRIBUTE].astype(str)
 
-    # Stable ordering by Case ID, Timestamp, and original row order
+    # Stable chronological ordering by Case ID, Timestamp, Start Timestamp (if dual), & source order
     order_col = "__importer_row_order__"
     out[order_col] = range(len(out))
+    sort_cols = (
+        [CASE_ID_ATTRIBUTE, START_TIMESTAMP_ATTRIBUTE, TIMESTAMP_ATTRIBUTE, order_col]
+        if has_dual_ts
+        else [CASE_ID_ATTRIBUTE, TIMESTAMP_ATTRIBUTE, order_col]
+    )
     out = (
         out.sort_values(
-            by=[CASE_ID_ATTRIBUTE, TIMESTAMP_ATTRIBUTE, order_col],
+            by=sort_cols,
             kind="mergesort",
             na_position="last",
         )
@@ -593,14 +626,25 @@ def apply_column_mapping(
         .reset_index(drop=True)
     )
 
+    warnings: list[str] = []
+    if orphan_dropped > 0:
+        warnings.append(f"Dropped {orphan_dropped:,} orphan event(s) missing Case ID.")
+    if missing_act_dropped > 0:
+        warnings.append(f"Dropped {missing_act_dropped:,} event(s) missing Activity.")
+    if missing_ts_dropped > 0:
+        warnings.append(f"Dropped {missing_ts_dropped:,} event(s) missing a valid Timestamp.")
+
     optional_present = validate_event_dataframe(out)
     metadata = {
         "case_count": int(out[CASE_ID_ATTRIBUTE].nunique()),
         "event_count": len(out),
         "attributes": [str(c) for c in out.columns],
         "optional_attributes": list(optional_present),
-        "valid_timestamps": int(out[TIMESTAMP_ATTRIBUTE].notna().sum()),
-        "invalid_timestamps": int(out[TIMESTAMP_ATTRIBUTE].isna().sum()),
+        "has_dual_timestamps": has_dual_ts,
+        "orphan_events_dropped": orphan_dropped,
+        "missing_activity_dropped": missing_act_dropped,
+        "missing_timestamp_dropped": missing_ts_dropped,
+        "warnings": warnings,
     }
     return out, metadata
 
@@ -613,6 +657,7 @@ __all__ = [
     "ROLE_OTHER",
     "ROLE_RESOURCE",
     "ROLE_TIMESTAMP",
+    "START_TIMESTAMP_ATTRIBUTE",
     "SUPPORTED_FILE_FILTER",
     "TIMESTAMP_FORMATS",
     "VALID_ROLES",

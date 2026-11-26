@@ -146,7 +146,8 @@ class _TimelineTableModel(QAbstractTableModel):
         "Step",
         "Activity",
         "Timestamp (UTC)",
-        "Waiting / Delta",
+        "Service Time",
+        "Waiting Time",
         "Elapsed",
         "Resource",
         "Lifecycle",
@@ -220,16 +221,18 @@ class _TimelineTableModel(QAbstractTableModel):
             if col == 2:
                 return str(ev.get("timestamp") or "NaT")
             if col == 3:
-                return str(ev.get("delta_from_prev_display", "—"))
+                return str(ev.get("service_time_display") or "instant")
             if col == 4:
-                return str(ev.get("elapsed_from_start_display", "—"))
+                return str(ev.get("delta_from_prev_display", "—"))
             if col == 5:
+                return str(ev.get("elapsed_from_start_display", "—"))
+            if col == 6:
                 return (
                     "(unavailable)"
                     if not self._has_resource
                     else str(ev.get("resource") or "—")
                 )
-            if col == 6:
+            if col == 7:
                 return (
                     "(unavailable)"
                     if not self._has_lifecycle
@@ -413,6 +416,7 @@ class CaseExplorerPage(QWidget):
                 ("activities", "Unique activities"),
                 ("start", "Start"),
                 ("duration", "Duration"),
+                ("active_time", "Active time"),
             ],
             top_card,
         )
@@ -827,6 +831,11 @@ class CaseExplorerPage(QWidget):
         self.kpi_panel.set_value("start", start_raw[:19].replace("T", " "))
         self.kpi_panel.set_value(
             "duration", str(detail.get("duration_human") or "—")
+        )
+        act_pct = float(detail.get("active_time_pct") or 0.0)
+        self.kpi_panel.set_value(
+            "active_time",
+            f"{act_pct:.1f} %" if act_pct > 0 else "0 %",
         )
 
         # Build smooth case event-progression profile for dark chart

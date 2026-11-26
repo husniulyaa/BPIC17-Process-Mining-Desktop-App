@@ -409,6 +409,67 @@ class TabularImporterTests(unittest.TestCase):
         self.assertEqual(len(raw_json), 3)
         self.assertEqual(detect_column_roles(raw_json)["Role"], ROLE_OTHER)
 
+        # 5. Dual-timestamp Service Time + Waiting Time + Active Time % verification
+        # Case 339:
+        #   Event 1: 16/02/2011 14:31 -> 15:23 (Service = 52 mins = 3120s)
+        #   Event 2: 17/02/2011 09:34 -> 09:40 (Service = 6 mins = 360s; Waiting = 18h 11m = 65460s)
+        det_339 = get_case_detail(mapped_df, "339")
+        self.assertTrue(det_339["has_dual_timestamps"])
+        self.assertAlmostEqual(det_339["timeline"][0]["service_time_seconds"], 3120.0)
+        self.assertAlmostEqual(det_339["timeline"][1]["service_time_seconds"], 360.0)
+        self.assertAlmostEqual(det_339["timeline"][1]["delta_from_prev_seconds"], 65460.0)
+        self.assertAlmostEqual(det_339["total_service_seconds"], 3480.0)
+        self.assertGreater(det_339["active_time_pct"], 0.0)
+
+    def test_process_mining_cardinality_rules_strictly_enforced(self) -> None:
+        from utils.tabular_importer import (
+            ROLE_ACTIVITY,
+            ROLE_CASE,
+            ROLE_OTHER,
+            ROLE_TIMESTAMP,
+            apply_column_mapping,
+        )
+
+        df = pd.DataFrame(
+            [
+                {"C1": "101", "C2": "SubA", "Act": "Order", "TS": "2026-01-01T08:00:00Z"},
+                {"C1": None, "C2": "SubB", "Act": "OrphanStep", "TS": "2026-01-01T09:00:00Z"},
+                {"C1": "101", "C2": "SubA", "Act": "", "TS": "2026-01-01T10:00:00Z"},
+                {"C1": "101", "C2": "SubA", "Act": "Pay", "TS": "not-a-timestamp"},
+                {"C1": "101", "C2": "SubA", "Act": "Ship", "TS": "2026-01-01T12:00:00Z"},
+            ]
+        )
+
+        # Violation 1a: 0 Case ID columns
+        with self.assertRaisesRegex(ValueError, "Exactly 1 Case ID"):
+            apply_column_mapping(df, {"C1": ROLE_OTHER, "Act": ROLE_ACTIVITY, "TS": ROLE_TIMESTAMP})
+
+        # Violation 1b: >1 Case ID columns (disallowed in non-OCPM process mining)
+        with self.assertRaisesRegex(ValueError, "Exactly 1 Case ID"):
+            apply_column_mapping(
+                df,
+                {"C1": ROLE_CASE, "C2": ROLE_CASE, "Act": ROLE_ACTIVITY, "TS": ROLE_TIMESTAMP},
+            )
+
+        # Violation 2: 0 Activity columns
+        with self.assertRaisesRegex(ValueError, "At least 1 Activity"):
+            apply_column_mapping(df, {"C1": ROLE_CASE, "Act": ROLE_OTHER, "TS": ROLE_TIMESTAMP})
+
+        # Violation 3: 0 Timestamp columns
+        with self.assertRaisesRegex(ValueError, "At least 1 Timestamp"):
+            apply_column_mapping(df, {"C1": ROLE_CASE, "Act": ROLE_ACTIVITY, "TS": ROLE_OTHER})
+
+        # Valid mapping: drops orphan event (no Case ID), missing Activity row, & invalid Timestamp row
+        clean_df, meta = apply_column_mapping(
+            df,
+            {"C1": ROLE_CASE, "C2": ROLE_OTHER, "Act": ROLE_ACTIVITY, "TS": ROLE_TIMESTAMP},
+        )
+        self.assertEqual(meta["orphan_events_dropped"], 1)
+        self.assertEqual(meta["missing_activity_dropped"], 1)
+        self.assertEqual(meta["missing_timestamp_dropped"], 1)
+        self.assertEqual(meta["event_count"], 2)
+        self.assertEqual(clean_df["concept:name"].tolist(), ["Order", "Ship"])
+
 
 @unittest.skipIf(QApplication is None, "PySide6 is required for GUI page smoke tests.")
 class GuiPageSmokeTests(unittest.TestCase):

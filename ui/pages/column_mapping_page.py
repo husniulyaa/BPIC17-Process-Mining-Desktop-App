@@ -1,4 +1,4 @@
-"""Fluxicon Disco-inspired Column Configuration & Universal Data Mapping page.
++"""Fluxicon Disco-inspired Column Configuration & Universal Data Mapping page.
 
 Reproduces Disco's interactive column mapping screen:
 - Top steel-blue gradient ribbon showing the active column name, 'column is used'
@@ -795,6 +795,16 @@ class ColumnMappingPage(QWidget):
             return
         col_idx = self.model.active_column_index()
         col_name = self.model.column_name(col_idx)
+
+        # Cardinality Rule 1: Exactly 1 Case ID column per event (demote previous Case column to Other)
+        if role_key == ROLE_CASE:
+            current_roles = self.model.roles()
+            for other_idx in range(self.model.columnCount()):
+                if other_idx != col_idx:
+                    other_name = self.model.column_name(other_idx)
+                    if current_roles.get(other_name) == ROLE_CASE:
+                        self.model.set_role(other_idx, ROLE_OTHER)
+
         self.model.set_role(col_idx, role_key)
         self.header_view.viewport().update()
         self.table.viewport().update()
@@ -804,9 +814,10 @@ class ColumnMappingPage(QWidget):
     def _reset_auto_roles(self) -> None:
         if self._raw_df is None or self._raw_df.empty:
             return
-        roles = detect_column_roles(self._raw_df)
+        sample_df = self._raw_df.head(250)
+        roles = detect_column_roles(sample_df)
         active = self.model.active_column_index()
-        self.model.set_preview(self._raw_df, roles, active_col=active)
+        self.model.set_preview(sample_df, roles, active_col=active)
         self._select_column(active)
         self._update_validation_state()
 
@@ -817,24 +828,30 @@ class ColumnMappingPage(QWidget):
 
         roles = self.model.roles()
         vals = list(roles.values())
-        missing = []
-        if ROLE_CASE not in vals:
-            missing.append("Case")
-        if ROLE_ACTIVITY not in vals:
-            missing.append("Activity")
-        if ROLE_TIMESTAMP not in vals:
-            missing.append("Timestamp")
+        case_cnt = vals.count(ROLE_CASE)
+        act_cnt = vals.count(ROLE_ACTIVITY)
+        ts_cnt = vals.count(ROLE_TIMESTAMP)
 
-        if missing:
-            self.lbl_validation.setText(
-                f"⚠ Missing required role(s): {', '.join(missing)}"
-            )
+        issues = []
+        if case_cnt != 1:
+            issues.append(f"Case ID must be = 1 (currently {case_cnt})")
+        if act_cnt < 1:
+            issues.append("Activity must be ≥ 1")
+        if ts_cnt < 1:
+            issues.append("Timestamp must be ≥ 1")
+
+        if issues:
+            self.lbl_validation.setText("⚠ Cardinality rule: " + " · ".join(issues))
             self.lbl_validation.setStyleSheet("font-weight: 700; color: #A64B00;")
             self.btn_apply.setEnabled(False)
         else:
-            fname = Path(self._source_path).name if self._source_path else "Active table"
+            ts_mode = (
+                "Start + Complete → Service & Waiting Time"
+                if ts_cnt >= 2
+                else "1 Timestamp → Waiting Time"
+            )
             self.lbl_validation.setText(
-                f"✓ Ready ({len(self._raw_df):,} rows from {fname})"
+                f"✓ Valid (Case = 1 · Activity = {act_cnt} · Timestamp = {ts_cnt} [{ts_mode}])"
             )
             self.lbl_validation.setStyleSheet("font-weight: 700; color: #1E7038;")
             self.btn_apply.setEnabled(True)

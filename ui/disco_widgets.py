@@ -1114,23 +1114,31 @@ class _TraceGraphCanvas(QWidget):
             painter.setFont(meta_font)
             painter.setPen(QColor("#555B62"))
 
-            ts_text = str(ev.get("timestamp") or "timestamp unavailable")
+            start_ts_txt = ev.get("start_timestamp")
+            ts_text = str(start_ts_txt or ev.get("timestamp") or "timestamp unavailable")[:19].replace("T", " ")
             res_val = ev.get("resource") or ev.get("org:resource")
-            line1 = f"{ts_text}" + (f"  ·  by {res_val}" if res_val else "")
+            prefix = "started at " if start_ts_txt else ""
+            line1 = f"{prefix}{ts_text}" + (f"  ·  by {res_val}" if res_val else "")
             painter.drawText(
                 QRectF(card_rect.left() + 12, y + 27, card_rect.width() - 24, 15),
                 int(Qt.AlignmentFlag.AlignCenter),
                 line1,
             )
 
+            svc_secs = ev.get("service_time_seconds")
+            svc_disp = ev.get("service_time_display")
             lc_val = ev.get("lifecycle") or ev.get("lifecycle:transition")
             role_val = ev.get("role")
             line2_parts = []
+            if svc_secs is not None and svc_secs > 0:
+                line2_parts.append(f"service time: {svc_disp}")
+            elif start_ts_txt:
+                line2_parts.append("completed instantly")
             if lc_val:
                 line2_parts.append(f"lifecycle: {lc_val}")
             if role_val and role_val != "intermediate":
                 line2_parts.append(role_val.replace("_", " "))
-            line2 = "  ·  ".join(line2_parts) if line2_parts else "recorded event"
+            line2 = "  ·  ".join(line2_parts) if line2_parts else "completed instantly"
             painter.drawText(
                 QRectF(card_rect.left() + 12, y + 42, card_rect.width() - 24, 15),
                 int(Qt.AlignmentFlag.AlignCenter),

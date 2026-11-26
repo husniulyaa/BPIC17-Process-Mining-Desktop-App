@@ -368,50 +368,74 @@ def get_case_detail(
         )
 
     parsed_ts = _parse_timestamps_utc(case_df[TIMESTAMP_ATTRIBUTE])
+    has_start_col = "time:start_timestamp" in case_df.columns
+    parsed_start_ts = (
+        _parse_timestamps_utc(case_df["time:start_timestamp"])
+        if has_start_col
+        else parsed_ts
+    )
     has_invalid_ts = bool(parsed_ts.isna().any())
 
-    valid_ts = parsed_ts.dropna()
-    first_valid_ts = valid_ts.iloc[0] if not valid_ts.empty else pd.NaT
-    if has_invalid_ts or valid_ts.empty:
+    valid_end_ts = parsed_ts.dropna()
+    valid_start_ts = parsed_start_ts.dropna()
+    first_valid_ts = (
+        min(valid_start_ts.min(), valid_end_ts.min())
+        if (not valid_start_ts.empty and not valid_end_ts.empty)
+        else (valid_end_ts.iloc[0] if not valid_end_ts.empty else pd.NaT)
+    )
+    if has_invalid_ts or valid_end_ts.empty:
         start_time = None if has_invalid_ts else format_timestamp(first_valid_ts)
         end_time = None
         duration_seconds: float | None = None
         duration_days: float | None = None
     else:
-        start_ts = valid_ts.min()
-        end_ts = valid_ts.max()
-        start_time = format_timestamp(start_ts)
-        end_time = format_timestamp(end_ts)
-        duration_seconds = float((end_ts - start_ts).total_seconds())
+        start_ts_bound = first_valid_ts
+        end_ts_bound = valid_end_ts.max()
+        start_time = format_timestamp(start_ts_bound)
+        end_time = format_timestamp(end_ts_bound)
+        duration_seconds = float((end_ts_bound - start_ts_bound).total_seconds())
         duration_days = duration_seconds / SECONDS_PER_DAY
 
-    known_cols = set(REQUIRED_ATTRIBUTES) | set(OPTIONAL_ATTRIBUTES)
+    known_cols = set(REQUIRED_ATTRIBUTES) | set(OPTIONAL_ATTRIBUTES) | {"time:start_timestamp"}
     extra_attributes = [
         str(col) for col in case_df.columns if col not in known_cols
     ]
 
     timeline: list[dict[str, Any]] = []
-    prev_ts: Any = pd.NaT
+    prev_complete_ts: Any = pd.NaT
+    total_service_seconds = 0.0
     records = case_df.to_dict("records")
     for idx_int, row in enumerate(records):
         ts = parsed_ts.iloc[idx_int]
+        s_ts = parsed_start_ts.iloc[idx_int]
+        if pd.isna(s_ts) or (pd.notna(ts) and s_ts > ts):
+            s_ts = ts
+
         act_raw = row.get(ACTIVITY_ATTRIBUTE)
         activity = "(missing)" if pd.isna(act_raw) else str(act_raw)
 
-        if idx_int == 0 or pd.isna(ts) or pd.isna(prev_ts):
+        # Service Time (Complete - Start when dual timestamps exist; 0.0 for atomic event)
+        if pd.notna(ts) and pd.notna(s_ts):
+            service_seconds: float | None = max(0.0, float((ts - s_ts).total_seconds()))
+            total_service_seconds += service_seconds
+        else:
+            service_seconds = None
+
+        # Waiting Time (current Start - previous Complete)
+        if idx_int == 0 or pd.isna(s_ts) or pd.isna(prev_complete_ts):
             delta_seconds: float | None = (
-                0.0 if (idx_int == 0 and pd.notna(ts)) else None
+                0.0 if (idx_int == 0 and pd.notna(s_ts)) else None
             )
         else:
-            delta_seconds = float((ts - prev_ts).total_seconds())
+            delta_seconds = max(0.0, float((s_ts - prev_complete_ts).total_seconds()))
 
         if pd.isna(ts) or pd.isna(first_valid_ts):
             elapsed_seconds: float | None = None
         else:
-            elapsed_seconds = float((ts - first_valid_ts).total_seconds())
+            elapsed_seconds = max(0.0, float((ts - first_valid_ts).total_seconds()))
 
         if pd.notna(ts):
-            prev_ts = ts
+            prev_complete_ts = ts
 
         extra_map = {attr: _clean_value(row.get(attr)) for attr in extra_attributes}
         timeline.append(
@@ -419,7 +443,14 @@ def get_case_detail(
                 "step": idx_int + 1,
                 "event_index": idx_int,
                 "activity": activity,
+                "start_timestamp": format_timestamp(s_ts) if has_start_col else None,
                 "timestamp": format_timestamp(ts),
+                "service_time_seconds": service_seconds,
+                "service_time_display": (
+                    "instant"
+                    if (service_seconds is not None and service_seconds == 0.0)
+                    else format_human_duration(service_seconds)
+                ),
                 "delta_from_prev_seconds": delta_seconds,
                 "delta_from_prev_display": (
                     "instant"
@@ -444,6 +475,12 @@ def get_case_detail(
         case_df[ACTIVITY_ATTRIBUTE].notna(), "(missing)"
     ).astype(str)
 
+    active_time_pct = (
+        min(100.0, max(0.0, total_service_seconds / duration_seconds * 100.0))
+        if (duration_seconds is not None and duration_seconds > 0)
+        else 0.0
+    )
+
     return {
         "case_id": target_id,
         "found": True,
@@ -455,6 +492,10 @@ def get_case_detail(
         "duration_days": duration_days,
         "duration_display": format_duration_seconds(duration_seconds),
         "duration_human": format_human_duration(duration_seconds),
+        "total_service_seconds": total_service_seconds,
+        "total_service_human": format_human_duration(total_service_seconds),
+        "active_time_pct": active_time_pct,
+        "has_dual_timestamps": has_start_col,
         "first_activity": str(activities_series.iloc[0]),
         "last_activity": str(activities_series.iloc[-1]),
         "has_lifecycle": has_lifecycle,
