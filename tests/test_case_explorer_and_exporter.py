@@ -317,6 +317,99 @@ class ExporterTests(unittest.TestCase):
         self.assertEqual(sanitize_filename_component("   "), "export")
 
 
+class TabularImporterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.dir_path = Path(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_csv_xlsx_xmx_and_json_import_and_column_mapping(self) -> None:
+        from utils.tabular_importer import (
+            ROLE_ACTIVITY,
+            ROLE_CASE,
+            ROLE_IGNORE,
+            ROLE_OTHER,
+            ROLE_RESOURCE,
+            ROLE_TIMESTAMP,
+            apply_column_mapping,
+            detect_column_roles,
+            read_raw_data_file,
+        )
+
+        # 1. Purchasing CSV similar to Disco screenshot (DD/MM/YYYY HH:MM + Start & Complete TS)
+        csv_file = self.dir_path / "purchasing.csv"
+        csv_file.write_text(
+            "Case ID;Start Timestamp;Complete Timestamp;Activity;Resource;Role\n"
+            "339;16/02/2011 14:31;16/02/2011 15:23;Create Purchase Requisition;Nico Ojenbeer;Requester\n"
+            "339;17/02/2011 09:34;17/02/2011 09:40;Analyze Purchase Requisition;Maris Freeman;Manager\n"
+            "940;17/05/2011 06:31;17/05/2011 07:08;Create Purchase Requisition;Immanuel;Requester\n",
+            encoding="utf-8",
+        )
+        raw_csv, info_csv = read_raw_data_file(csv_file)
+        self.assertFalse(info_csv["is_xes"])
+        self.assertEqual(len(raw_csv), 3)
+
+        roles = detect_column_roles(raw_csv)
+        self.assertEqual(roles["Case ID"], ROLE_CASE)
+        self.assertEqual(roles["Activity"], ROLE_ACTIVITY)
+        self.assertEqual(roles["Complete Timestamp"], ROLE_TIMESTAMP)
+        self.assertEqual(roles["Resource"], ROLE_RESOURCE)
+
+        # Also support marking BOTH Start & Complete Timestamp as ROLE_TIMESTAMP + excluding Role
+        roles["Start Timestamp"] = ROLE_TIMESTAMP
+        roles["Role"] = ROLE_IGNORE
+        mapped_df, meta = apply_column_mapping(raw_csv, roles)
+        self.assertEqual(meta["case_count"], 2)
+        self.assertEqual(meta["event_count"], 3)
+        self.assertNotIn("Role", mapped_df.columns)
+        self.assertEqual(mapped_df["org:resource"].iloc[0], "Nico Ojenbeer")
+
+        # 2. Excel .xlsx round-trip
+        xlsx_file = self.dir_path / "events.xlsx"
+        raw_csv.to_excel(xlsx_file, index=False)
+        raw_xlsx, _ = read_raw_data_file(xlsx_file)
+        self.assertEqual(len(raw_xlsx), 3)
+
+        # 3. MXML / .xmx file
+        xmx_file = self.dir_path / "sample.xmx"
+        xmx_file.write_text(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<WorkflowLog>
+  <Process id="P1">
+    <ProcessInstance id="CASE_XMX_1">
+      <AuditTrailEntry>
+        <WorkflowModelElement>O_Cancelled</WorkflowModelElement>
+        <EventType>complete</EventType>
+        <Timestamp>2026-01-01T09:00:00Z</Timestamp>
+        <Originator>Officer_1</Originator>
+      </AuditTrailEntry>
+      <AuditTrailEntry>
+        <WorkflowModelElement>O_Accepted</WorkflowModelElement>
+        <EventType>complete</EventType>
+        <Timestamp>2026-01-02T10:00:00Z</Timestamp>
+        <Originator>Officer_2</Originator>
+      </AuditTrailEntry>
+    </ProcessInstance>
+  </Process>
+</WorkflowLog>""",
+            encoding="utf-8",
+        )
+        raw_xmx, _ = read_raw_data_file(xmx_file)
+        xmx_roles = detect_column_roles(raw_xmx)
+        mapped_xmx, xmx_meta = apply_column_mapping(raw_xmx, xmx_roles)
+        self.assertEqual(xmx_meta["case_count"], 1)
+        self.assertEqual(analyze_exercise_1122(mapped_xmx)["case_ids"], ["CASE_XMX_1"])
+
+        # 4. JSON file
+        json_file = self.dir_path / "events.json"
+        raw_csv.to_json(json_file, orient="records")
+        raw_json, _ = read_raw_data_file(json_file)
+        self.assertEqual(len(raw_json), 3)
+        self.assertEqual(detect_column_roles(raw_json)["Role"], ROLE_OTHER)
+
+
 @unittest.skipIf(QApplication is None, "PySide6 is required for GUI page smoke tests.")
 class GuiPageSmokeTests(unittest.TestCase):
     @classmethod
@@ -331,6 +424,45 @@ class GuiPageSmokeTests(unittest.TestCase):
         explorer = CaseExplorerPage()
         explorer.set_event_data(None)
         self.assertFalse(explorer.select_case("MISSING"))
+
+    def test_disco_main_window_columns_dialog_and_process_map(self) -> None:
+        from ui.loading_dialog import DiscoLoadingDialog
+        from ui.main_window import MainWindow, _demo_df
+        from ui.pages.column_mapping_page import ColumnMappingPage
+        from ui.pages.process_map_page import compute_process_map_data
+        from utils.case_timeline import build_case_summaries_and_variants
+
+        df = _demo_df(25)
+        summaries, variants = build_case_summaries_and_variants(df)
+        self.assertEqual(len(summaries), 25)
+        self.assertGreaterEqual(len(variants), 1)
+        self.assertEqual(sum(v["case_count"] for v in variants), 25)
+
+        map_data = compute_process_map_data(df)
+        self.assertEqual(map_data["total_cases"], 25)
+        self.assertIn("A_Create Application", map_data["activities"])
+        self.assertGreater(len(map_data["edges"]), 0)
+
+        col_page = ColumnMappingPage()
+        col_page.set_raw_dataframe(df, source_path="demo.csv")
+        self.assertEqual(col_page.model.columnCount(), df.shape[1])
+
+        win = MainWindow()
+        self.assertIn("Disco - Lite", win.windowTitle())
+        self.assertIn("Kelompok 7", win.windowTitle())
+        for btn in win.nav_buttons:
+            label_txt = btn.text()
+            for num in ("11.7", "11.15", "11.18", "11.22"):
+                self.assertNotIn(num, label_txt)
+
+        dlg = DiscoLoadingDialog(win)
+        dlg.start("Testing…", "Stage 1")
+        dlg.update_stage("Stage 2")
+        dlg.finish()
+
+        win.set_event_data(df, path="(Unit Test Sample)")
+        self.assertEqual(len(win.pages), 8)
+        win.close()
 
 
 if __name__ == "__main__":

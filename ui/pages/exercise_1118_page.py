@@ -1,8 +1,7 @@
-"""Halaman GUI PySide6 untuk Exercise 11.18.
+"""Fluxicon Disco-inspired Same-Officer Fraud Rework page (F05).
 
-Menyediakan ``Exercise1118Page(QWidget)`` untuk menampilkan case yang memiliki
-minimal 2 event ``W_Assess Potential Fraud`` berstatus ``complete`` oleh
-resource yang sama dalam satu case.
+Wraps ``analysis.exercise_1118.analyze_exercise_1118`` without modifying the
+underlying analysis module.
 """
 
 from __future__ import annotations
@@ -12,43 +11,45 @@ import sys
 from typing import Any
 
 import pandas as pd
-from PySide6.QtWidgets import QApplication, QTableWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
-from analysis.exercise_1118 import EXERCISE_1118_RULE, analyze_exercise_1118
+from analysis.exercise_1118 import analyze_exercise_1118
 from ui.pages.exercise_1115_page import BaseExercisePage
 
 
 class Exercise1118Page(BaseExercisePage):
-    """Halaman QWidget untuk menampilkan analisis Exercise 11.18.
-
-    Mewarisi ``BaseExercisePage`` dengan sinyal integrasi ``case_selected(str)``
-    dan ``result_ready(dict)`` agar dapat dihubungkan ke Case Explorer oleh
-    modul utama.
-    """
+    """Same-Officer Fraud Rework page (>= 2 completed fraud checks by same resource)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
-            title="Exercise 11.18",
-            rule_description=EXERCISE_1118_RULE,
+            title="Same-Officer Fraud Rework",
+            rule_description=(
+                "Identifies unique cases where the exact same resource ('org:resource') "
+                "completed 'W_Assess Potential Fraud' at least twice within the same case. "
+                "Missing/blank resources are never treated as identical."
+            ),
             analyzer_fn=analyze_exercise_1118,
-            case_headers=["Case ID", "Resource", "Complete Count"],
+            case_headers=["Case ID", "Repeating Officer", "Completions by Officer"],
+            metric_key="complete_count_by_resource",
+            export_slug="same_officer_fraud_rework",
             parent=parent,
         )
 
-    def _populate_case_table(self, details: list[dict[str, Any]]) -> None:
-        self.case_table.setRowCount(len(details))
-        for row_idx, item in enumerate(details):
-            self.case_table.setItem(
-                row_idx, 0, QTableWidgetItem(str(item.get("case_id", "")))
+    def _build_case_rows(
+        self,
+        details: list[dict[str, Any]],
+    ) -> list[tuple[list[Any], dict[str, Any]]]:
+        return [
+            (
+                [
+                    str(item.get("case_id", "")),
+                    str(item.get("resource", "")),
+                    int(item.get("complete_count_by_resource", 0)),
+                ],
+                item,
             )
-            self.case_table.setItem(
-                row_idx, 1, QTableWidgetItem(str(item.get("resource", "")))
-            )
-            self.case_table.setItem(
-                row_idx,
-                2,
-                QTableWidgetItem(str(item.get("complete_count_by_resource", 0))),
-            )
+            for item in details
+        ]
 
 
 def _build_demo_dataframe() -> pd.DataFrame:
@@ -74,22 +75,6 @@ def _build_demo_dataframe() -> pd.DataFrame:
                 "org:resource": "User_A",
                 "EventID": "E_102",
             },
-            {
-                "case:concept:name": "Demo_Case_02",
-                "concept:name": "W_Assess potential fraud",
-                "lifecycle:transition": "complete",
-                "time:timestamp": "2016-01-02T09:00:00+00:00",
-                "org:resource": "User_1",
-                "EventID": "E_201",
-            },
-            {
-                "case:concept:name": "Demo_Case_02",
-                "concept:name": "W_Assess potential fraud",
-                "lifecycle:transition": "complete",
-                "time:timestamp": "2016-01-02T09:30:00+00:00",
-                "org:resource": "User_2",
-                "EventID": "E_202",
-            },
         ]
     )
 
@@ -97,8 +82,7 @@ def _build_demo_dataframe() -> pd.DataFrame:
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     page = Exercise1118Page()
-    page.setWindowTitle("Demo Mandiri - Exercise 11.18")
-    page.resize(960, 560)
-    page.set_event_data(_build_demo_dataframe())
+    page.resize(1040, 620)
     page.show()
+    page.set_event_data(_build_demo_dataframe())
     sys.exit(app.exec())

@@ -1,8 +1,9 @@
-"""Halaman GUI PySide6 untuk Exercise 11.22 (F06).
+"""Fluxicon Disco-inspired Re-Accepted Cancelled Offers page (F06).
 
-Menampilkan ringkasan hasil analisis ``analysis.exercise_1122``, daftar case
-yang memiliki ``O_Cancelled`` diikuti ``O_Accepted`` pada waktu lebih akhir,
-cuplikan timeline/evidence per case, navigasi ke Case Explorer, dan ekspor CSV.
+Displays results from ``analysis.exercise_1122.analyze_exercise_1122`` using
+descriptive process-mining terminology, a dark turnaround-time distribution
+chart, inline proportional bar tables, a Disco step-flow evidence viewer,
+Case Explorer navigation, and CSV export.
 """
 
 from __future__ import annotations
@@ -21,18 +22,16 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -41,17 +40,25 @@ from PySide6.QtWidgets import (
 from analysis.exercise_1122 import (
     ACCEPTED_ACTIVITY,
     CANCELLED_ACTIVITY,
-    EXERCISE_1122_RULE,
     LIFECYCLE_ATTRIBUTE,
     RESOURCE_ATTRIBUTE,
     analyze_exercise_1122,
 )
+from ui.disco_widgets import (
+    DiscoBarDelegate,
+    DiscoDarkChart,
+    DiscoKpiPanel,
+    DiscoSegmentedToggle,
+    DiscoTraceGraphWidget,
+    make_disco_search,
+    style_disco_table,
+)
+from ui.task_scheduler import GLOBAL_TASK_SCHEDULER
+from utils.case_timeline import format_human_duration
 from utils.exporter import export_analysis_result_to_csv
 
 
-class _Analyze1122Worker(QThread):
-    """Worker background untuk menjalankan analisis Exercise 11.22 di luar UI thread."""
-
+class _AnalyzeReAcceptedWorker(QThread):
     completed = Signal(dict)
     failed = Signal(str)
 
@@ -61,32 +68,46 @@ class _Analyze1122Worker(QThread):
 
     def run(self) -> None:
         try:
-            result = analyze_exercise_1122(self._event_df)
-            self.completed.emit(result)
-        except Exception as exc:  # noqa: BLE001 - tampilkan pesan ramah ke pengguna
+            self.completed.emit(analyze_exercise_1122(self._event_df))
+        except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
 
-class _Exercise1122CaseModel(QAbstractTableModel):
-    """Model tabel ringan untuk daftar case hasil Exercise 11.22."""
-
+class _ReAcceptedCaseModel(QAbstractTableModel):
     HEADERS = (
         "Case ID",
-        "O_Cancelled Pertama",
-        "O_Accepted Setelahnya",
-        "Selisih Waktu",
-        "Event Antara",
-        "Total Event",
+        "First O_Cancelled",
+        "Subsequent O_Accepted",
+        "Turnaround",
+        "Steps Between",
+        "Total Events",
     )
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._rows: list[dict[str, Any]] = []
+        self._max_turnaround = 1.0
+        self._max_events = 1.0
 
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self.beginResetModel()
         self._rows = list(rows)
+        self._max_turnaround = max(
+            (float(r.get("time_between_seconds") or 0.0) for r in rows),
+            default=1.0,
+        ) or 1.0
+        self._max_events = max(
+            (float(r.get("total_events") or 0.0) for r in rows),
+            default=1.0,
+        ) or 1.0
         self.endResetModel()
+
+    def max_for_column(self, col: int) -> float:
+        if col == 3:
+            return self._max_turnaround
+        if col == 5:
+            return self._max_events
+        return 0.0
 
     def row_at(self, row_index: int) -> dict[str, Any] | None:
         if 0 <= row_index < len(self._rows):
@@ -105,11 +126,7 @@ class _Exercise1122CaseModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> Any:
-        if (
-            role == Qt.ItemDataRole.DisplayRole
-            and orientation == Qt.Orientation.Horizontal
-            and 0 <= section < len(self.HEADERS)
-        ):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self.HEADERS[section]
         return None
 
@@ -120,7 +137,6 @@ class _Exercise1122CaseModel(QAbstractTableModel):
     ) -> Any:
         if not index.isValid():
             return None
-
         row = self._rows[index.row()]
         col = index.column()
 
@@ -128,15 +144,17 @@ class _Exercise1122CaseModel(QAbstractTableModel):
             if col == 0:
                 return str(row.get("case_id", ""))
             if col == 1:
-                return str(row.get("first_cancelled_timestamp") or "—")
+                return str(row.get("first_cancelled_timestamp") or "—")[:19].replace("T", " ")
             if col == 2:
-                return str(row.get("first_accepted_after_cancelled_timestamp") or "—")
+                return str(
+                    row.get("first_accepted_after_cancelled_timestamp") or "—"
+                )[:19].replace("T", " ")
             if col == 3:
-                return str(row.get("time_between_display") or "—")
+                return format_human_duration(row.get("time_between_seconds"))
             if col == 4:
-                return str(row.get("events_between_count", 0))
+                return f"{int(row.get('events_between_count', 0)):,}"
             if col == 5:
-                return str(row.get("total_events", 0))
+                return f"{int(row.get('total_events', 0)):,}"
 
         if role == Qt.ItemDataRole.UserRole:
             if col == 0:
@@ -152,31 +170,28 @@ class _Exercise1122CaseModel(QAbstractTableModel):
             if col == 5:
                 return int(row.get("total_events") or 0)
 
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (3, 4, 5):
+        if role == Qt.ItemDataRole.TextAlignmentRole and col == 4:
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
         return None
 
 
-class _EvidenceTimelineModel(QAbstractTableModel):
-    """Model tabel cuplikan timeline/evidence untuk case terpilih."""
-
+class _EvidenceTableModel(QAbstractTableModel):
     HEADERS = (
         "Step",
-        "Aktivitas",
+        "Activity",
         "Timestamp (UTC)",
         "Lifecycle",
         "Resource",
-        "Peran Evidence",
+        "Evidence Role",
     )
 
     _ROLE_LABELS = {
-        "first_o_cancelled": "O_Cancelled pertama",
-        "first_o_accepted_after_cancelled": "O_Accepted setelah O_Cancelled",
-        "o_accepted_after_cancelled": "O_Accepted lanjutan",
-        "o_accepted_not_after_cancelled": "O_Accepted sebelum/sama waktu",
-        "o_cancelled": "O_Cancelled lain",
-        "intermediate": "Event perantara",
+        "first_o_cancelled": "Initial O_Cancelled",
+        "first_o_accepted_after_cancelled": "Subsequent O_Accepted",
+        "o_accepted_after_cancelled": "Additional O_Accepted",
+        "o_accepted_not_after_cancelled": "Earlier/equal O_Accepted",
+        "o_cancelled": "Additional O_Cancelled",
+        "intermediate": "Intermediate step",
     }
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -200,68 +215,49 @@ class _EvidenceTimelineModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> Any:
-        if (
-            role == Qt.ItemDataRole.DisplayRole
-            and orientation == Qt.Orientation.Horizontal
-            and 0 <= section < len(self.HEADERS)
-        ):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self.HEADERS[section]
         return None
 
-    def data(
-        self,
-        index: QModelIndex,
-        role: int = Qt.ItemDataRole.DisplayRole,
-    ) -> Any:
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         if not index.isValid():
             return None
-
-        event = self._events[index.row()]
+        ev = self._events[index.row()]
         col = index.column()
-        activity = str(event.get("activity", ""))
+        act = str(ev.get("activity", ""))
 
         if role == Qt.ItemDataRole.DisplayRole:
             if col == 0:
-                return str(event.get("step", ""))
+                return str(ev.get("step", ""))
             if col == 1:
-                return activity
+                return act
             if col == 2:
-                return str(event.get("timestamp") or "NaT")
+                return str(ev.get("timestamp") or "NaT")
             if col == 3:
-                if LIFECYCLE_ATTRIBUTE not in event:
-                    return "(tidak tersedia)"
-                return str(event.get(LIFECYCLE_ATTRIBUTE) or "—")
+                return (
+                    "(unavailable)"
+                    if LIFECYCLE_ATTRIBUTE not in ev
+                    else str(ev.get(LIFECYCLE_ATTRIBUTE) or "—")
+                )
             if col == 4:
-                if RESOURCE_ATTRIBUTE not in event:
-                    return "(tidak tersedia)"
-                return str(event.get(RESOURCE_ATTRIBUTE) or "—")
-            if col == 5:
-                raw_role = str(event.get("role", ""))
-                return self._ROLE_LABELS.get(raw_role, raw_role or "—")
+                return (
+                    "(unavailable)"
+                    if RESOURCE_ATTRIBUTE not in ev
+                    else str(ev.get(RESOURCE_ATTRIBUTE) or "—")
+                )
+            raw_role = str(ev.get("role", ""))
+            return self._ROLE_LABELS.get(raw_role, raw_role or "—")
 
         if role == Qt.ItemDataRole.BackgroundRole:
-            if activity == CANCELLED_ACTIVITY:
+            if act == CANCELLED_ACTIVITY:
                 return QBrush(QColor("#FDECEC"))
-            if activity == ACCEPTED_ACTIVITY:
+            if act == ACCEPTED_ACTIVITY:
                 return QBrush(QColor("#E8F7EE"))
-
-        if role == Qt.ItemDataRole.TextAlignmentRole and col == 0:
-            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
         return None
 
 
 class Exercise1122Page(QWidget):
-    """Halaman hasil Exercise 11.22 (``O_Cancelled`` diikuti ``O_Accepted``).
-
-    Signals:
-        open_case_requested (str): Dipancarkan saat pengguna membuka case di
-            Case Explorer (selaras dengan ``Exercise117Page``).
-        case_selected (str): Alias sinyal pilihan case untuk integrasi lintas
-            halaman (selaras dengan ``Exercise1115Page``).
-        result_ready (dict): Dipancarkan saat analisis selesai dengan payload
-            dict hasil ``analyze_exercise_1122``.
-    """
+    """Fluxicon Disco-inspired Re-Accepted Cancelled Offers page (F06)."""
 
     open_case_requested = Signal(str)
     case_selected = Signal(str)
@@ -269,268 +265,230 @@ class Exercise1122Page(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Exercise 11.22")
+        self.setWindowTitle("Re-Accepted Cancelled Offers")
 
         self.event_df: pd.DataFrame | None = None
         self._result: dict[str, Any] | None = None
-        self._worker: _Analyze1122Worker | None = None
+        self._worker: _AnalyzeReAcceptedWorker | None = None
+        self._dirty = False
         self._rerun_pending = False
-        self._metric_labels: dict[str, QLabel] = {}
 
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(18, 14, 18, 12)
+        root.setSpacing(10)
 
-        title = QLabel("Exercise 11.22 — O_Cancelled Diikuti O_Accepted")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        root.addWidget(title)
-
-        self.lbl_rule = QLabel(f"Aturan: {EXERCISE_1122_RULE}")
+        # Header & action buttons
+        hdr = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        lbl_title = QLabel("Re-Accepted Cancelled Offers")
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #1E2226;")
+        self.lbl_rule = QLabel(
+            "Identifies unique cases where an offer cancellation ('O_Cancelled') is "
+            "followed at a strictly later timestamp by an offer acceptance ('O_Accepted') "
+            "within the same case, whether adjacent or separated by intermediate events."
+        )
         self.lbl_rule.setWordWrap(True)
-        self.lbl_rule.setStyleSheet("color: #444444;")
-        root.addWidget(self.lbl_rule)
+        self.lbl_rule.setStyleSheet("color: #5E666E; font-size: 11px;")
+        title_col.addWidget(lbl_title)
+        title_col.addWidget(self.lbl_rule)
+        hdr.addLayout(title_col, 1)
 
-        # Baris kontrol
-        controls = QHBoxLayout()
-        self.btn_run = QPushButton("Jalankan / Hitung Ulang")
-        self.btn_run.clicked.connect(self.run_analysis)
-
-        self.btn_reset = QPushButton("Reset Tampilan")
-        self.btn_reset.clicked.connect(self._reset_view)
-
-        self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Cari Case ID...")
-        self.txt_search.setClearButtonEnabled(True)
-        self.txt_search.textChanged.connect(self._apply_search)
-
-        self.btn_open_explorer = QPushButton("Buka di Case Explorer")
-        self.btn_open_explorer.clicked.connect(self._on_open_case_clicked)
-        self.btn_open_explorer.setEnabled(False)
-
-        self.btn_export = QPushButton("Ekspor CSV")
-        self.btn_export.clicked.connect(lambda: self.export_results())
-        self.btn_export.setEnabled(False)
-
-        controls.addWidget(self.btn_run)
-        controls.addWidget(self.btn_reset)
-        controls.addWidget(self.txt_search, 1)
-        controls.addWidget(self.btn_open_explorer)
-        controls.addWidget(self.btn_export)
-        root.addLayout(controls)
-
-        # Status & loading bar
-        status_row = QHBoxLayout()
-        self.lbl_status = QLabel("Belum ada dataset aktif.")
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
-        self.progress.setMaximumWidth(160)
+        self.progress.setMaximumWidth(130)
         self.progress.setTextVisible(False)
         self.progress.hide()
-        status_row.addWidget(self.lbl_status, 1)
-        status_row.addWidget(self.progress)
-        root.addLayout(status_row)
+        hdr.addWidget(self.progress)
 
+        self.btn_run = QPushButton("Recalculate")
+        self.btn_run.setObjectName("toolbarBtn")
+        self.btn_run.clicked.connect(self.run_analysis)
+        hdr.addWidget(self.btn_run)
 
-        # Kartu ringkasan metrik
-        cards_layout = QGridLayout()
-        cards_layout.setSpacing(10)
+        self.btn_reset = QPushButton("Reset Filter")
+        self.btn_reset.setObjectName("toolbarBtn")
+        self.btn_reset.clicked.connect(self._reset_view)
+        hdr.addWidget(self.btn_reset)
 
-        metric_specs = (
-            ("matched", "Case Memenuhi 11.22"),
-            ("total_log", "Total Case di Log"),
-            ("percentage", "Persentase Case"),
-            ("same_ts", "Timestamp Sama (Dikecualikan)"),
-        )
+        self.btn_export = QPushButton("Export CSV")
+        self.btn_export.setObjectName("toolbarBtn")
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(lambda: self.export_results())
+        hdr.addWidget(self.btn_export)
+        root.addLayout(hdr)
 
-        for col_idx, (key, caption) in enumerate(metric_specs):
-            frame = QFrame()
-            frame.setObjectName("metricCard")
-            frame.setStyleSheet("""
-                QFrame#metricCard {
-                    background-color: #292F27;
-                    border: 1px solid #454A3E;
-                    border-radius: 8px;
-                }
-            """)
-
-            box = QVBoxLayout(frame)
-            box.setContentsMargins(12, 10, 12, 10)
-            box.setSpacing(5)
-
-            lbl_cap = QLabel(caption)
-            lbl_cap.setStyleSheet("""
-                QLabel {
-                    color: #B6B3A7;
-                    background: transparent;
-                    border: none;
-                    padding: 0px;
-                    font-size: 11px;
-                }
-            """)
-
-            lbl_val = QLabel("—")
-            lbl_val.setStyleSheet("""
-                QLabel {
-                    color: #F1EDE2;
-                    background: transparent;
-                    border: none;
-                    padding: 0px;
-                    font-size: 20px;
-                    font-weight: bold;
-                }
-            """)
-
-            box.addWidget(lbl_cap)
-            box.addWidget(lbl_val)
-
-            cards_layout.addWidget(frame, 0, col_idx)
-            self._metric_labels[key] = lbl_val
-
-        root.addLayout(cards_layout)
-
-
-        # Banner peringatan (tampil hanya jika ada warnings)
+        # Warnings banner
         self.lbl_warnings = QLabel("")
         self.lbl_warnings.setWordWrap(True)
         self.lbl_warnings.setStyleSheet(
-            "background-color: #FFF8E1; border: 1px solid #F0C36D; "
-            "border-radius: 4px; padding: 6px; color: #5C4400;"
+            "background: #FFF8E5; border: 1px solid #E5C365; "
+            "border-radius: 4px; padding: 5px 8px; color: #664D03;"
         )
         self.lbl_warnings.hide()
         root.addWidget(self.lbl_warnings)
 
-        # Splitter daftar case dan panel evidence
-        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        # Top Disco Dark Chart + Right KPI Panel
+        top_card = QFrame()
+        top_card.setObjectName("discoWhitePanel")
+        top_layout = QHBoxLayout(top_card)
+        top_layout.setContentsMargins(12, 10, 14, 10)
+        top_layout.setSpacing(14)
 
-        # Panel atas: tabel case cocok
-        top_panel = QWidget(splitter)
-        top_layout = QVBoxLayout(top_panel)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        self.lbl_count = QLabel("")
-        top_layout.addWidget(self.lbl_count)
+        self.chart = DiscoDarkChart(top_card)
+        self.chart.setFixedHeight(150)
+        top_layout.addWidget(self.chart, 1)
 
-        self.case_model = _Exercise1122CaseModel(self)
+        self.kpi_panel = DiscoKpiPanel(
+            [
+                ("matched", "Re-accepted cases"),
+                ("total_log", "Total cases in log"),
+                ("percentage", "Match rate"),
+                ("mean_turnaround", "Mean turnaround"),
+                ("same_ts", "Equal-timestamp ties"),
+            ],
+            top_card,
+        )
+        top_layout.addWidget(self.kpi_panel)
+        root.addWidget(top_card)
+
+        # Search + Open in Cases toolbar
+        bar = QHBoxLayout()
+        self.lbl_status = QLabel("Import an XES event log to detect re-accepted cancelled offers.")
+        self.lbl_status.setStyleSheet("font-weight: 600; color: #495057;")
+        bar.addWidget(self.lbl_status, 1)
+
+        self.txt_search = make_disco_search("Search case ID...")
+        self.txt_search.setFixedWidth(210)
+        self.txt_search.textChanged.connect(self._apply_search)
+        bar.addWidget(self.txt_search)
+
+        self.btn_open_explorer = QPushButton("Open in Cases")
+        self.btn_open_explorer.setObjectName("primaryActionBtn")
+        self.btn_open_explorer.setEnabled(False)
+        self.btn_open_explorer.clicked.connect(self._on_open_case_clicked)
+        bar.addWidget(self.btn_open_explorer)
+        root.addLayout(bar)
+
+        # Horizontal splitter: Matched Cases Table (left) | Step Flow / Evidence Table (right)
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+
+        self.case_model = _ReAcceptedCaseModel(self)
         self.case_proxy = QSortFilterProxyModel(self)
         self.case_proxy.setSourceModel(self.case_model)
         self.case_proxy.setSortRole(Qt.ItemDataRole.UserRole)
         self.case_proxy.setFilterKeyColumn(0)
         self.case_proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
-        self.case_table = QTableView()
+        self.case_table = style_disco_table(QTableView())
         self.case_table.setModel(self.case_proxy)
         self.case_table.setSortingEnabled(True)
-        self.case_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.case_table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
-        )
-        self.case_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.case_table.setAlternatingRowColors(True)
-        self.case_table.verticalHeader().hide()
-        self.case_table.horizontalHeader().setStretchLastSection(True)
         self.case_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
+        bar_delegate = DiscoBarDelegate(
+            self.case_model.max_for_column, parent=self.case_table
+        )
+        self.case_table.setItemDelegateForColumn(3, bar_delegate)
+        self.case_table.setItemDelegateForColumn(5, bar_delegate)
         self.case_table.selectionModel().selectionChanged.connect(
             self._on_case_selection_changed
         )
         self.case_table.doubleClicked.connect(
             lambda _idx: self._on_open_case_clicked()
         )
-        top_layout.addWidget(self.case_table, 1)
+        splitter.addWidget(self.case_table)
 
-        # Panel bawah: evidence / cuplikan timeline
-        bottom_panel = QWidget(splitter)
-        bottom_layout = QVBoxLayout(bottom_panel)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        self.lbl_evidence_title = QLabel(
-            "Cuplikan Timeline & Evidence (pilih satu case pada tabel di atas)"
+        # Right panel: Evidence Flow | Table
+        right_panel = QWidget(splitter)
+        r_layout = QVBoxLayout(right_panel)
+        r_layout.setContentsMargins(8, 0, 0, 0)
+        r_layout.setSpacing(6)
+
+        ev_hdr = QHBoxLayout()
+        self.lbl_evidence_title = QLabel("Cancellation → Acceptance Excerpt")
+        self.lbl_evidence_title.setStyleSheet("font-weight: 700; color: #3A4046;")
+        ev_hdr.addWidget(self.lbl_evidence_title, 1)
+
+        self.ev_toggle = DiscoSegmentedToggle([("flow", "Flow"), ("table", "Table")])
+        self.ev_toggle.changed.connect(
+            lambda k: self.ev_stack.setCurrentIndex(1 if k == "table" else 0)
         )
-        self.lbl_evidence_title.setStyleSheet("font-weight: bold;")
-        bottom_layout.addWidget(self.lbl_evidence_title)
+        ev_hdr.addWidget(self.ev_toggle)
+        r_layout.addLayout(ev_hdr)
 
-        self.evidence_model = _EvidenceTimelineModel(self)
-        self.evidence_table = QTableView()
+        self.ev_stack = QStackedWidget(right_panel)
+        self.ev_graph = DiscoTraceGraphWidget(self.ev_stack)
+        self.ev_stack.addWidget(self.ev_graph)
+
+        self.evidence_model = _EvidenceTableModel(self)
+        self.evidence_table = style_disco_table(QTableView())
         self.evidence_table.setModel(self.evidence_model)
-        self.evidence_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.evidence_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.evidence_table.setAlternatingRowColors(True)
-        self.evidence_table.verticalHeader().hide()
-        self.evidence_table.horizontalHeader().setStretchLastSection(True)
-        self.evidence_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
-        )
-        bottom_layout.addWidget(self.evidence_table, 1)
+        self.ev_stack.addWidget(self.evidence_table)
 
-        splitter.addWidget(top_panel)
-        splitter.addWidget(bottom_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        r_layout.addWidget(self.ev_stack, 1)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 6)
+        splitter.setStretchFactor(1, 5)
         root.addWidget(splitter, 1)
 
     # ------------------------------------------------------------ public API
     def set_event_data(self, event_df: pd.DataFrame | None) -> None:
-        """Terima DataFrame event bersama dari Main Window dan jalankan analisis."""
         self.event_df = event_df
         self._result = None
         self._clear_view()
 
         if event_df is None or event_df.empty:
-            self.lbl_status.setText("Dataset kosong atau belum dimuat.")
+            self._dirty = False
+            self.lbl_status.setText("No active dataset loaded.")
             self._rerun_pending = self._worker is not None
             return
 
-        self.run_analysis()
+        self._dirty = True
+        if self.isVisible():
+            self.run_analysis()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._dirty and self.event_df is not None and not self.event_df.empty:
+            self.run_analysis()
 
     def run_analysis(self) -> None:
-        """Jalankan analisis Exercise 11.22 secara asinkron di QThread."""
         if self.event_df is None or self.event_df.empty:
-            self.lbl_status.setText("Tidak ada dataset aktif untuk dianalisis.")
+            self.lbl_status.setText("No active dataset to analyze.")
             return
-
-        if self._worker is not None:
-            self._rerun_pending = True
-            return
-
+        df_ref = self.event_df
+        self._dirty = False
         self.btn_run.setEnabled(False)
         self.btn_export.setEnabled(False)
         self.progress.show()
-        self.lbl_status.setText("Menjalankan analisis Exercise 11.22...")
+        self.lbl_status.setText("Scanning cases for O_Cancelled followed by O_Accepted…")
 
-        worker = _Analyze1122Worker(self.event_df, self)
-        worker.completed.connect(self._on_completed)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(self._on_worker_finished)
-        worker.finished.connect(worker.deleteLater)
-        self._worker = worker
-        worker.start()
+        GLOBAL_TASK_SCHEDULER.submit(
+            "reaccepted_1122",
+            lambda: analyze_exercise_1122(df_ref),
+            self._on_completed,
+            self._on_failed,
+            high_priority=True,
+        )
 
     def get_result(self) -> dict[str, Any] | None:
-        """Kembalikan hasil analisis terakhir (atau ``None`` jika belum ada)."""
         return self._result
 
     def export_results(self, file_path: str | Path | None = None) -> Path | None:
-        """Ekspor hasil analisis Exercise 11.22 ke file CSV."""
         if self._result is None:
-            self.lbl_status.setText("Belum ada hasil analisis untuk diekspor.")
+            self.lbl_status.setText("Run the analysis first before exporting.")
             return None
 
         target_path: str | Path | None = file_path
         if target_path is None:
             selected, _ = QFileDialog.getSaveFileName(
                 self,
-                "Ekspor Hasil Exercise 11.22 ke CSV",
-                "exercise_1122_results.csv",
+                "Export Re-Accepted Cancelled Offers to CSV",
+                "reaccepted_cancelled_offers.csv",
                 "CSV Files (*.csv);;All Files (*)",
             )
             if not selected:
@@ -540,64 +498,79 @@ class Exercise1122Page(QWidget):
         try:
             saved_path = export_analysis_result_to_csv(self._result, target_path)
         except Exception as exc:  # noqa: BLE001
-            self.lbl_status.setText(f"Gagal mengekspor CSV: {exc}")
-            QMessageBox.warning(
-                self,
-                "Ekspor CSV Gagal",
-                f"Tidak dapat menyimpan hasil ke CSV:\n{exc}",
-            )
+            self.lbl_status.setText(f"CSV export failed: {exc}")
+            QMessageBox.warning(self, "CSV Export Failed", str(exc))
             return None
 
-        self.lbl_status.setText(f"Hasil Exercise 11.22 diekspor ke: {saved_path}")
+        self.lbl_status.setText(f"Exported results to {saved_path}")
         return saved_path
 
     # ------------------------------------------------------------ slots
     def _on_completed(self, result: dict[str, Any]) -> None:
-        if self._rerun_pending:
-            return
+        self.progress.hide()
+        self.btn_run.setEnabled(True)
 
         self._result = result
+        details = result.get("details", [])
         matched = int(result.get("total_cases", 0))
         total_log = int(result.get("total_cases_in_log", 0))
         pct = (matched / total_log * 100.0) if total_log > 0 else 0.0
         same_ts_count = len(result.get("same_timestamp_cases", []))
 
-        self._metric_labels["matched"].setText(f"{matched:,}")
-        self._metric_labels["total_log"].setText(f"{total_log:,}")
-        self._metric_labels["percentage"].setText(f"{pct:.2f}%")
-        self._metric_labels["same_ts"].setText(f"{same_ts_count:,}")
+        secs_list = [float(d.get("time_between_seconds") or 0.0) for d in details]
+        mean_sec = (sum(secs_list) / len(secs_list)) if secs_list else None
+
+        self.kpi_panel.set_value("matched", f"{matched:,}")
+        self.kpi_panel.set_value("total_log", f"{total_log:,}")
+        self.kpi_panel.set_value("percentage", f"{pct:.2f}%")
+        self.kpi_panel.set_value("mean_turnaround", format_human_duration(mean_sec))
+        self.kpi_panel.set_value("same_ts", f"{same_ts_count:,}")
+
+        if secs_list:
+            days_s = pd.Series([s / 86400.0 for s in secs_list])
+            if days_s.nunique() > 1:
+                bins = pd.cut(days_s, bins=min(36, max(2, len(days_s))))
+                hist = bins.value_counts().sort_index()
+                self.chart.set_series(
+                    [float(v) for v in hist.values],
+                    [f"{days_s.min():.1f} d", f"{days_s.max():.1f} d"],
+                    kind="bars",
+                    x_caption="Turnaround time from O_Cancelled to O_Accepted (days)",
+                    y_caption="Cases",
+                )
+            else:
+                self.chart.set_series(
+                    [float(len(days_s))],
+                    [format_human_duration(secs_list[0])],
+                    kind="bars",
+                    x_caption="Turnaround time",
+                    y_caption="Cases",
+                )
+        else:
+            self.chart.clear_chart("No re-accepted cancelled offers found in this log")
 
         warnings = result.get("warnings") or []
         if warnings:
-            self.lbl_warnings.setText(
-                "Catatan / Peringatan:\n• " + "\n• ".join(warnings)
-            )
+            self.lbl_warnings.setText("Notes:  " + "  ·  ".join(warnings))
             self.lbl_warnings.show()
         else:
             self.lbl_warnings.hide()
 
-        self.case_model.set_rows(result.get("details", []))
+        self.case_model.set_rows(details)
         self.evidence_model.set_events([])
+        self.ev_graph.set_events([])
         self.btn_export.setEnabled(True)
         self._update_count()
 
-        if matched == 0:
-            self.lbl_status.setText(
-                f"Selesai. Tidak ditemukan case dengan O_Cancelled diikuti "
-                f"O_Accepted (dari {total_log:,} case)."
-            )
-        else:
-            self.lbl_status.setText(
-                f"Selesai. Ditemukan {matched:,} case dari {total_log:,} total case "
-                f"({pct:.2f}%)."
-            )
+        if matched > 0:
             self.case_table.selectRow(0)
 
         self.result_ready.emit(result)
 
     def _on_failed(self, message: str) -> None:
-        if not self._rerun_pending:
-            self.lbl_status.setText(f"Error saat menjalankan Exercise 11.22: {message}")
+        self.progress.hide()
+        self.btn_run.setEnabled(True)
+        self.lbl_status.setText(f"Analysis failed: {message}")
 
     def _on_worker_finished(self) -> None:
         self._worker = None
@@ -613,21 +586,42 @@ class Exercise1122Page(QWidget):
         if row_data is None:
             self.btn_open_explorer.setEnabled(False)
             self.evidence_model.set_events([])
-            self.lbl_evidence_title.setText(
-                "Cuplikan Timeline & Evidence (pilih satu case pada tabel di atas)"
-            )
+            self.ev_graph.set_events([])
+            self.lbl_evidence_title.setText("Cancellation → Acceptance Excerpt")
             return
 
         self.btn_open_explorer.setEnabled(True)
-        case_id = str(row_data.get("case_id", ""))
-        excerpt = row_data.get("timeline_excerpt") or row_data.get("evidence_events") or []
+        cid = str(row_data.get("case_id", ""))
+        excerpt = list(
+            row_data.get("timeline_excerpt") or row_data.get("evidence_events") or []
+        )
         between = int(row_data.get("events_between_count", 0))
-        delta = str(row_data.get("time_between_display", "—"))
+        delta = format_human_duration(row_data.get("time_between_seconds"))
         self.lbl_evidence_title.setText(
-            f"Cuplikan Timeline Case '{case_id}' — {len(excerpt)} event "
-            f"({between} event antara O_Cancelled & O_Accepted, selisih {delta})"
+            f"{cid}  ·  {between} intermediate step(s)  ·  {delta}"
         )
         self.evidence_model.set_events(excerpt)
+
+        # Populate step-by-step deltas for DiscoTraceGraphWidget
+        graph_events = []
+        prev_ts = None
+        for ev in excerpt:
+            ev_copy = dict(ev)
+            ts_raw = ev_copy.get("timestamp")
+            delta_str = ""
+            if ts_raw is not None:
+                cur_ts = pd.to_datetime(ts_raw, errors="coerce", utc=True)
+                if prev_ts is not None and pd.notna(cur_ts) and pd.notna(prev_ts):
+                    sec = max(0.0, float((cur_ts - prev_ts).total_seconds()))
+                    delta_str = format_human_duration(sec)
+                prev_ts = cur_ts
+            ev_copy["delta_from_prev_display"] = delta_str
+            graph_events.append(ev_copy)
+
+        self.ev_graph.set_events(
+            graph_events,
+            highlight_activities=[CANCELLED_ACTIVITY, ACCEPTED_ACTIVITY],
+        )
 
     def _selected_case_row(self) -> dict[str, Any] | None:
         selection = self.case_table.selectionModel().selectedRows()
@@ -639,11 +633,10 @@ class Exercise1122Page(QWidget):
     def _on_open_case_clicked(self) -> None:
         row_data = self._selected_case_row()
         if row_data is None:
-            self.lbl_status.setText("Pilih satu baris Case ID terlebih dahulu.")
             return
-        case_id = str(row_data["case_id"])
-        self.open_case_requested.emit(case_id)
-        self.case_selected.emit(case_id)
+        cid = str(row_data["case_id"])
+        self.open_case_requested.emit(cid)
+        self.case_selected.emit(cid)
 
     def _apply_search(self, text: str) -> None:
         self.case_proxy.setFilterFixedString(text.strip())
@@ -652,8 +645,10 @@ class Exercise1122Page(QWidget):
     def _update_count(self) -> None:
         total = self.case_model.rowCount()
         shown = self.case_proxy.rowCount()
-        self.lbl_count.setText(
-            f"Menampilkan {shown:,} dari {total:,} case yang cocok" if total else ""
+        self.lbl_status.setText(
+            f"Showing {shown:,} of {total:,} re-accepted cases"
+            if total
+            else "0 re-accepted cancelled offers matched"
         )
 
     def _reset_view(self) -> None:
@@ -662,17 +657,15 @@ class Exercise1122Page(QWidget):
         self._update_count()
 
     def _clear_view(self) -> None:
-        for label in self._metric_labels.values():
-            label.setText("—")
+        self.kpi_panel.reset()
+        self.chart.clear_chart()
         self.lbl_warnings.hide()
         self.case_model.set_rows([])
         self.evidence_model.set_events([])
-        self.lbl_evidence_title.setText(
-            "Cuplikan Timeline & Evidence (pilih satu case pada tabel di atas)"
-        )
+        self.ev_graph.set_events([])
+        self.lbl_evidence_title.setText("Cancellation → Acceptance Excerpt")
         self.btn_open_explorer.setEnabled(False)
         self.btn_export.setEnabled(False)
-        self._update_count()
 
 
 __all__ = ["Exercise1122Page"]
